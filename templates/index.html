@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>D&D Virtual Tabletop</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.3.2/socket.io.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+
+</head>
+<body>
+    <h1>D&D Virtual Tabletop</h1>
+
+    <!-- Controls -->
+    <div id="controls">
+        <input type="file" id="mapUpload" accept="image/*">
+        <button onclick="addToken('User')">Add User</button>
+        <button onclick="addToken('NPC')">Add NPC</button>
+        <button onclick="addToken('Enemy')">Add Enemy</button>
+        <button onclick="toggleCombat()">Toggle Combat</button>
+        <button onclick="nextTurn()">Next Turn</button>
+    </div>
+
+    <!-- Context Menu -->
+    <div class="context-menu" id="contextMenu">
+        <div class="context-menu-item" onclick="showCharacterSheet(event)">Character Sheet</div>
+        <div class="context-menu-item" onclick="deleteSelectedToken()">Delete Token</div>
+    </div>
+
+    <div id="container">
+        <div id="board">
+            <div class="grid-overlay"></div>
+        </div>
+        <!-- Add this above the dice controls in the chat-log div -->
+        <div id="chat-log">
+            <h3>Dice Rolls & Chat</h3>
+            <input type="text" id="playerName" placeholder="Your Name" style="margin-bottom: 10px;">
+            <div class="dice-controls">
+
+                <button onclick="rollDice('d20')">D20</button>
+                <button onclick="rollDice('d12')">D12</button>
+                <button onclick="rollDice('d10')">D10</button>
+                <button onclick="rollDice('d8')">D8</button>
+                <button onclick="rollDice('d6')">D6</button>
+                <button onclick="rollDice('d4')">D4</button>
+            </div>
+            <input type="text" id="diceInput" placeholder="e.g., 2d6+3">
+            <button onclick="manualRoll()">Roll</button>
+            <ul id="chatMessages"></ul>
+        </div>
+    </div>
+
+    <!-- Add before </body> -->
+    <div class="character-sheet" id="characterSheet">
+        <h3>Character Sheet</h3>
+        <input type="text" id="charName" placeholder="Character Name">
+        <input type="number" id="charHP" placeholder="Hit Points">
+        <textarea id="charNotes" rows="6" placeholder="Character Notes & References"></textarea>
+        <button onclick="saveCharacterData()">Save</button>
+    </div>
+
+    <textarea id="textBox" class="textbox"></textarea>
+
+    <script>
+    const socket = io();
+    const board = document.getElementById("board");
+    const textBox = document.getElementById("textBox");
+    const contextMenu = document.getElementById('contextMenu');
+    const gridSize = 50;
+    const tokenSize = 30;
+
+    let turnOrder = [];
+    let currentTurn = -1;
+    let combatActive = false;
+    let activeToken = null;
+    let selectedTokenId = null;
+
+    // Map upload handler
+    document.getElementById("mapUpload").addEventListener("change", function(event) {
+        let file = event.target.files[0];
+        let formData = new FormData();
+        formData.append("file", file);
+
+        fetch("/upload", { method: "POST", body: formData })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === "success") {
+                    board.style.backgroundImage = `url(${data.url})`;
+                }
+            });
+    });
+
+    // Add Token Function
+    function addToken(type) {
+        const initialX = Math.floor(board.offsetWidth / 2 / gridSize) * gridSize + (gridSize - tokenSize)/2;
+        const initialY = Math.floor(board.offsetHeight / 2 / gridSize) * gridSize + (gridSize - tokenSize)/2;
+        socket.emit("add_token", {
+            x: initialX,
+            y: initialY,
+            type: type
+        });
+    }
+
+    function toggleCombat() {
+        socket.emit("toggle_combat");
+    }
+
+    function nextTurn() {
+        socket.emit("next_turn");
+    }
+
+    function rollDice(diceType) {
+        const playerName = document.getElementById('playerName').value || 'Anonymous';
+        let roll = '1' + diceType;
+        socket.emit("roll_dice", { player: playerName, roll: roll });
+    }
+
+    function manualRoll() {
+        const roll = document.getElementById("diceInput").value;
+        const playerName = document.getElementById('playerName').value || 'Anonymous';
+        if (roll) {
+            socket.emit("roll_dice", { player: playerName, roll: roll });
+        }
+    }
+
+    function highlightCurrentTurn() {
+        document.querySelectorAll(".token").forEach(token => {
+            token.classList.remove("active-turn");
+            let tokenId = parseInt(token.getAttribute("data-id"));
+            if (turnOrder[currentTurn] === tokenId) {
+                token.classList.add("active-turn");
+            }
+        });
+    }
+
+    // Context Menu Functions
+    function showCharacterSheet(event) { // Add event parameter
+        event.stopPropagation(); // Prevent event bubbling
+
+        const tokenElement = document.querySelector(`[data-id="${selectedTokenId}"]`);
+        if (!tokenElement) return;
+
+        let tokenData = {};
+        try {
+            tokenData = JSON.parse(tokenElement.getAttribute("data-text") || "{}");
+        } catch {
+            tokenData = {};
+        }
+
+        document.getElementById("charName").value = tokenData.name || "";
+        document.getElementById("charHP").value = tokenData.hp || "";
+        document.getElementById("charNotes").value = tokenData.notes || "";
+
+        // Use proper display style matching your CSS
+        document.getElementById("characterSheet").style.display = "flex"; // Changed to flex
+        contextMenu.style.display = "none";
+    }
+
+    function deleteSelectedToken() {
+        if (selectedTokenId) {
+            socket.emit("delete_token", { id: selectedTokenId });
+        }
+        contextMenu.style.display = 'none';
+    }
+
+    // Close context menu on outside click
+    document.addEventListener('click', function(e) {
+        if (!contextMenu.contains(e.target)) {
+            contextMenu.style.display = 'none';
+        }
+    });
+
+    socket.on("board_state", function(data) {
+        document.querySelectorAll(".token").forEach(t => t.remove());
+        data.tokens.forEach(token => createToken(token));
+        combatActive = data.combat_active;
+        currentTurn = data.current_turn;
+        highlightCurrentTurn();
+        if (data.image) {
+            board.style.backgroundImage = `url(${data.image})`;
+        }
+    });
+
+    // Add new save function
+    function saveCharacterData() {
+        const tokenElement = document.querySelector(`[data-id="${selectedTokenId}"]`);
+        if (!tokenElement) return;
+
+        const charData = {
+            name: document.getElementById("charName").value,
+            hp: document.getElementById("charHP").value,
+            notes: document.getElementById("charNotes").value
+        };
+
+        // Update token data and broadcast
+        socket.emit("update_text", {
+            id: selectedTokenId,
+            text: JSON.stringify(charData)
+        });
+
+        // Close modal
+        document.getElementById("characterSheet").style.display = "none";
+    }
+
+    socket.on("token_moved", function(data) {
+        const token = document.querySelector(`[data-id="${data.id}"]`);
+        if (token) {
+            token.style.left = `${data.x}px`;
+            token.style.top = `${data.y}px`;
+        }
+    });
+
+    socket.on("token_deleted", function(data) {
+        const token = document.querySelector(`[data-id="${data.id}"]`);
+        if (token) token.remove();
+    });
+
+    socket.on("combat_status", function (data) {
+        combatActive = data.active;
+        currentTurn = data.current_turn;
+        highlightCurrentTurn();
+    });
+
+    socket.on("turn_updated", function (data) {
+        currentTurn = data.current_turn;
+        highlightCurrentTurn();
+    });
+
+    socket.on("dice_result", function (data) {
+        let chatMessages = document.getElementById("chatMessages");
+        let message = document.createElement("li");
+        message.innerHTML = data.message;
+        chatMessages.appendChild(message);
+        // Auto-scroll to bottom
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    });
+
+    socket.on("token_added", function(data) {
+        createToken(data);
+    });
+
+    function createToken(data) {
+        let token = document.createElement("div");
+        token.classList.add("token");
+        token.innerText = data.type[0];
+        token.style.backgroundColor = data.color;
+        token.style.left = `${data.x}px`;
+        token.style.top = `${data.y}px`;
+        token.setAttribute("data-id", data.id);
+        token.setAttribute("data-type", data.type);
+        token.setAttribute("data-text", data.text || "{}");  // Initialize with empty JSON object
+        board.appendChild(token);
+        makeDraggable(token);
+        // Ensure we merge existing data with default fields
+        const tokenData = data.text ? JSON.parse(data.text) : {};
+        token.setAttribute("data-text", JSON.stringify({
+            name: "",
+            hp: "",
+            notes: "",
+            ...tokenData
+        }));
+    }
+
+    function makeDraggable(token) {
+        let offsetX = 0, offsetY = 0;
+        let isDragging = false;
+        let mouseDownTime = 0;
+        let selectedToken = null;
+
+        // Context Menu Handler
+        token.addEventListener("contextmenu", function(event) {
+            event.preventDefault();
+            selectedTokenId = parseInt(token.getAttribute("data-id"));
+
+            // Get viewport dimensions
+            const viewportWidth = window.innerWidth;
+            const viewportHeight = window.innerHeight;
+
+            // Show menu first to calculate dimensions
+            contextMenu.style.display = 'block';
+
+            // Calculate potential overflow
+            const menuWidth = contextMenu.offsetWidth;
+            const menuHeight = contextMenu.offsetHeight;
+
+            // Adjust position if needed
+            let leftPosition = event.clientX;
+            let topPosition = event.clientY;
+
+            // Horizontal overflow check
+            if (leftPosition + menuWidth > viewportWidth) {
+                leftPosition = viewportWidth - menuWidth - 5;
+            }
+
+            // Vertical overflow check
+            if (topPosition + menuHeight > viewportHeight) {
+                topPosition = viewportHeight - menuHeight - 5;
+            }
+
+            // Set final position
+            contextMenu.style.left = `${leftPosition}px`;
+            contextMenu.style.top = `${topPosition}px`;
+        });
+
+        token.addEventListener("mousedown", function (event) {
+            if (event.button === 2) return;
+            event.stopPropagation();
+            mouseDownTime = Date.now();
+            isDragging = false;
+            selectedToken = token;
+
+            let rect = token.getBoundingClientRect();
+            offsetX = event.clientX - rect.left;
+            offsetY = event.clientY - rect.top;
+
+            document.addEventListener("mousemove", moveToken);
+            document.addEventListener("mouseup", releaseToken);
+        });
+
+        function moveToken(event) {
+            if (!selectedToken) return;
+
+            let newX = event.clientX - offsetX - board.getBoundingClientRect().left;
+            let newY = event.clientY - offsetY - board.getBoundingClientRect().top;
+
+            newX = Math.floor((newX + gridSize/2) / gridSize) * gridSize - tokenSize/2;
+            newY = Math.floor((newY + gridSize/2) / gridSize) * gridSize - tokenSize/2;
+
+            selectedToken.style.left = `${newX}px`;
+            selectedToken.style.top = `${newY}px`;
+
+            isDragging = true;
+        }
+
+        function releaseToken() {
+            if (!selectedToken) return;
+            document.removeEventListener("mousemove", moveToken);
+            document.removeEventListener("mouseup", releaseToken);
+
+            let clickDuration = Date.now() - mouseDownTime;
+            if (!isDragging && clickDuration < 300) {
+                showTextBox(selectedToken);
+            } else {
+                socket.emit("move_token", {
+                    id: parseInt(selectedToken.getAttribute("data-id")),
+                    x: parseInt(selectedToken.style.left),
+                    y: parseInt(selectedToken.style.top)
+                });
+            }
+
+            selectedToken = null;
+        }
+    }
+    // Add to existing click handler to close modal
+    document.addEventListener('click', function(e) {
+        if (!contextMenu.contains(e.target)) {
+            contextMenu.style.display = 'none';
+        }
+        if (!document.getElementById("characterSheet").contains(e.target)) {
+            document.getElementById("characterSheet").style.display = 'none';
+        }
+    });
+
+    // Add this with your other socket listeners
+    socket.on("text_updated", function(data) {
+        const token = document.querySelector(`[data-id="${data.id}"]`);
+        if (token) {
+            token.setAttribute("data-text", data.text);
+        }
+    });
+
+    socket.emit("request_board_state");
+    </script>
+</body>
+</html>
